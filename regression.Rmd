@@ -1,0 +1,409 @@
+---
+title: "Machine Learning Project - regression on medical dataset"
+author: "Dariusz Kesicki"
+date: "7th June 2021"
+output:
+  html_document:
+    number_sections: true
+    theme: spacelab
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+fontsize: 12pt
+---
+
+
+```{r setup, include=FALSE}
+rm(list = ls())
+options(scipen=999)
+Sys.setenv(LANG = "en")
+
+```
+
+```{r libraries, include=FALSE}  
+# loading libraries used in the project
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(caret)
+library(corrplot)
+library(tidyverse)
+library(glmnet)
+library(olsrr)
+library(knitr)
+library(kableExtra)
+library(moments)
+
+
+```
+```{r data, include = FALSE}  
+data <- read.csv("C:/Users/darek/OneDrive/Desktop/data.csv")
+
+```
+```{r, include=FALSE}
+factors <- c("anaemia", "diabetes", "high_blood_pressure", "sex", "smoking", "DEATH_EVENT")
+for (i in factors) data[,i] <- factor(data[,i])
+```
+
+
+# Introduction
+
+Nowadays, developing medicine obtains more and more data about the health of patients. Thanks to mathematical sciences such as statistics, researchers are able to obtain valuable information for the treatment of patients. In addition, the development of areas such as machine learning allows for obtaining conclusions that are not visible with simple analysis. 
+
+The presented work will try to answer the question whether it is possible to predict the value of one of the medical metrics on the basis of others and behavioral variables.For this purpose, a database containing information on the health of several hundred patients from the USA was used. The paper focuses on performing three regression methods and evaluating them in order to find the most effective one.
+
+# Data description and processing
+
+The dataset used in this project was downloaded from [Kaggle](https://www.kaggle.com/andrewmvd/heart-failure-clinical-data?fbclid=IwAR3ZFR97c-XvJhWKEMv_Bh-H32XiH8jDQ5OX1Kt0KVKolaRrsdep_pIMCeg). It provides information about health status of 299 patients. Dataset that was used contains 13 variables. These are:
+
+* Age (integer value)
+* Decrease of red blood cells or hemoglobin (boolean value)
+* Level of the CPK enzyme in the blood in mcg/L (integer value)
+* If the patient has diabetes (boolean value)
+* Percentage of blood leaving the heart at each contraction (percentage)
+* If the patient has hypertension (boolean value)
+* Platelets in the blood in kiloplatelets/mL  (integer value)
+* Level of serum creatinine in the blood in mg/dL (double value)
+* Level of serum sodium in the blood in mEq/L (integer value)
+* Woman or man (binary value)
+* If the patient smokes or not (boolean value)
+* Follow-up period (integer value)
+* If the patient deceased during the follow-up period (boolean value)
+
+Dataset is summarized in the table below.
+
+```{r}
+summary(data)
+```
+
+
+
+## Data processing
+
+In the initial analysis of dataset, we check whether the dataset contains missing values. For this purpose We have calculated the percentage of missing value for each variable using function is.na. 
+
+
+```{r}
+missing <- (colSums(is.na(data))/dim(data)[1])
+missing
+
+```
+As we can see, the set does not contain any missing data, so we do not have to solve this problem. 
+
+The time variable contains information about follow-up period of patients. This value can be useful for predicting a death event. However, in presented study, another dependent variable was selected so this variable do not provide much value to the research. Therefore it was decided to remove it from further analysis. 
+```{r}
+drop <- c("time")
+data <- data[,-which(names(data) %in% drop)]
+
+```
+## Creating new variable
+ 
+One variable has been added to make better use of the available data. With careful analysis of the variables it was noticed that some binary variables result from numerical variables. This is the case with variables percentage of blood leaving the heart at each contraction (ejection_fraction) and if the patient has hypertension (high_blood_pressure). Therefore it was decided to add a variable creatinine_problem which was created from the value serum_creatinine. Variable  creatinine_problem have boolean values. Creatinine_problem is equal to 1 when females have serum_creatinine greater than 1.0 or males greater than 1.2.Otherwise this value is equal to 0. 
+
+
+```{r}
+data$creatinine_problem<-0
+data$creatinine_problem<-ifelse(data$sex==1 & data$serum_creatinine>1.2,1,ifelse(data$sex==0 & data$serum_creatinine>1,1,0))
+factors<-c("creatinine_problem")
+for (i in factors) data[,i] <- factor(data[,i])
+
+
+```
+
+## Dependent variable 
+
+In order to select the dependent variable, the distributions of all variables were analyzed. The variable serum_sodium was closest to the normal distribution and therefore it was selected as the dependent variable.
+
+To visualize the distribution of selected variable we have created a histogram. As it is presented in the chart it is similar to normal. However, moment statistics such as skewness and kurtosis differ from normal. Negative skewness indicate that left-handed tail is larger than the right-handed tail (skewness=-1.04287) . Additionally, we are dealing with leptokurtosis (kurtosis=7.031142).
+
+```{r}
+
+ggplot(data, aes(serum_sodium)) +
+  geom_histogram(aes(y=..count..),
+                 fill="#c7ceea",
+                 alpha = 0.8,
+                 color="blue", 
+                 bins = 30) +
+  labs(x = "Serum Sodium", y = "Frequency")
+
+print(skewness(data$serum_sodium))
+print(kurtosis(data$serum_sodium))
+
+```
+
+To make the distribution of the dependent variable more symmetrical and close to the normal distribution, we have used the natural logarithm of the serum_sodium. The moment statistics did not improve, so in further analysis it was decided to stay with the variable serum_sodium.
+
+
+```{r}
+data$log_serum_sodium <- log(data$serum_sodium)
+
+ggplot(data, aes(log_serum_sodium )) +
+  geom_histogram(aes(y=..count..),
+                 fill="#c7ceea",
+                 alpha = 0.8,
+                 color="blue", 
+                 bins = 30) +
+  labs(x = "Log_serum_sodium", y = "Frequency")
+
+
+print(skewness(data$log_serum_sodium))
+print(kurtosis(data$log_serum_sodium))
+
+```
+```{r,include=FALSE}
+drop <- c("log_serum_sodium")
+data <- data[,-which(names(data) %in% drop)]
+
+```
+# Empirical research
+
+
+## Creating subsamples
+
+
+Firstly, we have split the data into two subsamples - training sample (70%) and test sample (30%). The first sample will be used to train the model and then we will compare the obtained estimations to the real observed values from the test sample. In order to investigate whether subgroups are similar to each other, it was decided to calculate their basic statistics. On their basis it was concluded that the groups are similar to each other (equal median,mean, 1st and 3rd quantile) 
+
+```{r}
+set.seed(987654321)
+train <- createDataPartition(data$serum_sodium,
+                                          p = 0.7,
+                                          list = FALSE)
+
+data_train <- data[train,]
+data_test <- data[-train,]
+data_train<-as.data.frame(data_train)
+summary(data_train$serum_sodium)
+summary(data_test$serum_sodium)
+```
+
+## Correlation matrix
+
+To present a correlation matrix, we have extracted all the numeric variables included in the research. Then, we calculated the correlation between the dependent variable with each independent variable. The results are presented below in the form of the correlation matrix.
+
+
+```{r, include = FALSE}
+numeric <-
+  sapply(data, is.numeric) %>%
+  which() %>%
+  names()
+
+correlations <-
+  cor(data_train[,numeric],
+      use = "pairwise.complete.obs")
+
+numeric2 <-
+  correlations[,"serum_sodium"] %>%
+  sort(decreasing = TRUE) %>%
+  names()
+
+```
+
+```{r}
+corrplot.mixed(correlations[numeric2,
+                                   numeric2],
+               upper = "square",
+               lower = "number",
+               tl.col="blue",
+               tl.pos = "lt")
+```
+
+The greatest correlation between the dependent variable and the explanatory variable occurs in the case of the variables telling about percentage of blood leaving the heart at each contraction (ejection_fraction) and level of serum creatinine in the blood (serum_creatninie). 
+
+In the case of the similarity of the explanatory variables, it is clear that we are not dealing with multicollinearity. The correlation in any case does not exceed 0.18, which is a low value. This observation was also confirmed using function findLinearCombos, which enumerated and resolves the linear combinations in a numeric matrix.
+
+```{r}
+linear_comb <- findLinearCombos(data_train[, numeric])
+linear_comb
+```
+
+## ANOVA
+
+In the next step the independent factor variables were analyzed. The influence of the factor independent variable on the dependent variable was investigated using the ANOVA method. The null hypothesis is that levels of the explanatory variable influence the dependent variable equally.
+
+The F statistic values are presented below. With high F statistics we reject the null hypothesis. In our set, the highest values of the F statistic have variables creatinine_problem and DEATH_EVENT.
+
+
+```{r}
+factors <-
+  sapply(data_train, is.factor) %>%
+  which() %>%
+  names()
+Anova <- function(factors) {
+  Anova2 <- aov(data_train$serum_sodium ~
+                  data_train[[factors]])
+  return(summary(Anova2)[[1]][1, 4]) }
+
+Anova_results <- sapply(factors, Anova) %>%
+  sort(decreasing = TRUE) 
+Anova_results
+
+```
+
+## Estimated models
+
+In the presented work, 4 methods were used to predict a dependent variable values on the test dataset. The benchmark method was ordinary least squares estimation. The results achieved by this method were used for comparison with results obtained by machine learning methods. 
+
+The second estimated model was a ridge regression -  machine learning method useful when there is a danger of colinearity in the data. This algorithms is more robust than a simple OLS model when it comes to overfiting to the training data. 
+
+Third method was Lasso with is very similar to ridge, becouse it also shrinks the Beta parameters to zero.
+
+The last model was one of the most popular machine learning method ok K-nearest neighbours.
+
+Taking into account the fact that a relatively small database was used, it was decided to apply no cross validation and leave one out cross validation for each method. This method train model n times and each time the test sample consists of just one different observation. 
+
+Below are codes implementing described models.
+
+
+```{r}
+
+# Cross-validation parameters
+ctrl_LOOCV <- trainControl(method = "LOOCV",
+                         )
+ctrl_nocv <- trainControl(method = "none")
+
+# Ordinary least squares estimation
+OLS_nocv <- caret::train(serum_sodium ~ .,
+                          data = data_train,
+                          method = "lm",
+                          trControl = ctrl_nocv)
+
+# Ridge regression with no cross-validation and with LOOCV
+lambdas <- exp(log(10)*seq(-2, 9, length.out = 200))
+tgrid_nocv <- expand.grid(alpha = 0, lambda=0.05)
+tgrid <- expand.grid(alpha = 0, lambda=lambdas)
+
+Ridge_nocv <- caret::train(serum_sodium ~ .,
+                         data = data_train,
+                         method = "glmnet",
+                         tuneGrid = tgrid_nocv,
+                         trControl = ctrl_nocv)
+Ridge_cv <- caret::train(serum_sodium ~ .,
+                       data = data_train,
+                       method = "glmnet",
+                       tuneGrid = tgrid,
+                       trControl = ctrl_LOOCV)
+
+#Lasso regression with no cross-validation and with LOOCV
+tgrid_l <- expand.grid(alpha = 1, lambda=lambdas)
+tgrid_nocv_l <- expand.grid(alpha = 1, lambda=0.05)
+
+Lasso_nocv <- caret::train(serum_sodium ~ .,
+                         data = data_train,
+                         method = "glmnet",
+                         tuneGrid = tgrid_nocv_l,
+                         trControl = ctrl_nocv)
+Lasso_cv <- caret::train(serum_sodium ~ .,
+                        data = data_train,
+                        method = "glmnet",
+                        tuneGrid = tgrid_l,
+                        trControl = ctrl_LOOCV)
+#KNN with no cross-validation and with LOOCV
+KNN_nocv <- caret::train(serum_sodium ~ .,
+                         data = data_train,
+                         method = "knn",
+                         trControl = ctrl_nocv)
+KNN_cv <- caret::train(serum_sodium ~ .,
+                        data = data_train,
+                        method = "knn",
+                        trControl = ctrl_LOOCV)
+```
+
+In order to assess the quality of the predictions, the regressionMetrics function was used. It calculates the prediction statistics such as mean square error, root mean square error, mean absolute error, median absolute error, mean logarithmic absolute error and R^2.
+
+```{r}
+regressionMetrics <- function(real, predicted) {
+  # Total Sum of Squares
+  TSS <- sum((real - mean(real))^2)
+  # Explained Sum of Squares
+  RSS <- sum((predicted - real)^2)
+  # R2
+  R2 <- 1 - RSS/TSS
+  # Mean Square Error
+  MSE <- mean((real - predicted)^2)
+  # Root Mean Square Error
+  RMSE <- sqrt(MSE)
+  # Mean Absolute Error
+  MAE <- mean(abs(real - predicted))
+  # Median Absolute Error
+  MedAE <- median(abs(real - predicted))
+  # Mean Logarithmic Absolute Error
+  MSLE <- mean((log(1 + real) - log(1 + predicted))^2)
+  
+  result <- data.frame(MSE, RMSE, MAE, MedAE, MSLE, R2)
+  return(result)
+}
+```
+
+Then above function was applied for each trained model. Results are presented in separate tables. 
+
+```{r}
+#Evaluation of OLS 
+OLS_nocv_is <- regressionMetrics(data_train$serum_sodium, predict(OLS_nocv, data_train))
+OLS_nocv_os <- regressionMetrics(data_test$serum_sodium, predict(OLS_nocv, data_test))
+
+#Evaluation of Ridge with no cross-validation
+Ridge_nocv_is <- regressionMetrics(data_train$serum_sodium, predict(Ridge_nocv, data_train))
+Ridge_nocv_os <- regressionMetrics(data_test$serum_sodium, predict(Ridge_nocv, data_test))
+
+#Evaluation of Ridge with cross-validation
+Ridge_cv_is <- regressionMetrics(data_train$serum_sodium, predict(Ridge_cv, data_train))
+Ridge_cv_os <- regressionMetrics(data_test$serum_sodium, predict(Ridge_cv, data_test))
+
+#Evaluation of Lasso with no cross-validation
+Lasso_nocv_is <- regressionMetrics(data_train$serum_sodium, predict(Lasso_nocv, data_train))
+Lasso_nocv_os <- regressionMetrics(data_test$serum_sodium, predict(Lasso_nocv, data_test))
+
+#Evaluation of Lasso with cross-validation
+Lasso_cv_is <- regressionMetrics(data_train$serum_sodium, predict(Lasso_cv, data_train))
+Lasso_cv_os <- regressionMetrics(data_test$serum_sodium, predict(Lasso_cv, data_test))
+
+#Evaluation of KNN with no cross-validation
+KNN_nocv_is <- regressionMetrics(data_train$serum_sodium, predict(KNN_nocv, data_train))
+KNN_nocv_os <- regressionMetrics(data_test$serum_sodium, predict(KNN_nocv, data_test))
+
+#Evaluation of KNN with cross-validation
+KNN_cv_is <- regressionMetrics(data_train$serum_sodium, predict(KNN_cv, data_train))
+KNN_cv_os <- regressionMetrics(data_test$serum_sodium, predict(KNN_cv, data_test))
+```
+
+###  In sample results
+
+```{r}
+results <- rbind(OLS_nocv_is, Ridge_nocv_is, Ridge_cv_is, Lasso_nocv_is, Lasso_cv_is,KNN_nocv_is, KNN_cv_is )
+row.names(results) <- c('OLS','Ridge','Ridge with CV','Lasso', 'Lasso with CV ', 'KNN','KNN with CV' )
+results %>% 
+  kable() %>% 
+  kableExtra::kable_styling(full_width = T, 
+                            position = 'left', 
+                            font_size = 12)
+
+```
+
+### Out of sample results
+
+```{r}
+results2 <- rbind(OLS_nocv_os, Ridge_nocv_os, Ridge_cv_os, Lasso_nocv_os, Lasso_cv_os,KNN_nocv_os, KNN_cv_os )
+row.names(results2) <- c('OLS','Ridge','Ridge with CV','Lasso', 'Lasso with CV ', 'KNN','KNN with CV' )
+results2 %>% 
+  kable() %>% 
+  kableExtra::kable_styling(full_width = T, 
+                            position = 'left', 
+                            font_size = 12)
+
+```
+
+# Summary
+
+Our work examined the hypothesis whether it is possible to predict the value of a medical examination on the basis of other medical statistics of the same patient.  
+Low values of R^2 in all presented models tells us that it is not possible to predict with high accuracy, level of serum sodium in dataset that we used. The variability of the dependent variable was explained with a small extent.
+
+Comparing the obtained prediction metrics we make following conclusions. On the training set the best quality of prediction was achieved by the k nearest neighbors method without cross- validation (MSE= 15.22, R^2=0,15). From the other machine learning methods that was used in the study Ridge regression without cross- validation achieved similar results like OLS. Other methods achieved worse results in in sample period than benchmark. 
+
+The situation changed when we examine results of used methods in out of sample period. Here, two of the three machine learning methods turned out to be better than OLS. In case of Ridge and Lasso regression, the applied LOOCV cross-validation improved the quality of prediction. The best method on this sample was Ridge with CV (MSE=21.22254, R^2=0,07). K nearest neighbors technique didn't outperform benchmark OLS regression. 
+
+
+
+
+
